@@ -1,11 +1,11 @@
 name: Build NX1-Reborn Executables
 
 on:
-  workflow_dispatch: # 允许手动点击触发
+  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: windows-2022 # 动用微软官方的 VS2022 最新环境，完美支持现代 C++
+    runs-on: windows-2022
 
     steps:
     - name: Checkout Code
@@ -13,9 +13,8 @@ jobs:
       with:
         submodules: recursive
 
-    - name: Fix Broken Thirdparty Submodules (绕过原作者的坑)
+    - name: Fix Broken Thirdparty Submodules
       run: |
-        # 强制删除可能残缺的文件夹，并从官方源拉取完整的依赖库
         Remove-Item -Recurse -Force XenosRecomp\thirdparty -ErrorAction SilentlyContinue
         git clone --recursive https://github.com/hedge-dev/XenosRecomp.git TempXenos
         Copy-Item -Path "TempXenos\thirdparty" -Destination "XenosRecomp\thirdparty" -Recurse -Force
@@ -23,22 +22,20 @@ jobs:
     - name: Build XenosRecomp Tool
       run: |
         cd XenosRecomp
-        cmake -B build
+        cmake -B build -G Ninja
         cmake --build build --config Release
 
     - name: Build Singleplayer Engine (nx1_sp)
       run: |
         cd nx1_sp
-        cmake -B build
+        cmake -B build -G Ninja
         cmake --build build --config Release
-      continue-on-error: true # 防止万一需要本地游戏文件导致中断
 
     - name: Build Multiplayer Engine (nx1_mp)
       run: |
         cd nx1_mp
-        cmake -B build
+        cmake -B build -G Ninja
         cmake --build build --config Release
-      continue-on-error: true
 
     - name: Upload Compiled Executables
       uses: actions/upload-artifact@v4
@@ -46,5 +43,8 @@ jobs:
         name: NX1-Compiled-Binaries
         path: |
           XenosRecomp/build/Release/*.exe
+          XenosRecomp/build/*.exe
           nx1_sp/build/Release/*.exe
+          nx1_sp/build/*.exe
           nx1_mp/build/Release/*.exe
+          nx1_mp/build/*.exe
