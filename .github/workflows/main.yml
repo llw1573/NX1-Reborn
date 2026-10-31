@@ -1,4 +1,4 @@
-name: Test Local Runner
+name: sart
 
 on:
   workflow_dispatch:
