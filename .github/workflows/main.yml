@@ -1,4 +1,4 @@
-name: Build NX1-Reborn Executables
+name: Test Local Runner
 
 on:
   workflow_dispatch:
@@ -7,179 +7,15 @@ permissions:
   contents: read
 
 jobs:
-  build:
-    runs-on: windows-2022
-
-    defaults:
-      run:
-        shell: pwsh
+  test:
+    runs-on: [self-hosted, windows, x64, nx1-local]
 
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      # 为现有的依赖恢复方案固定上游版本，避免每次运行拉到不同内容。
-      - name: Checkout XenosRecomp Dependencies
-        uses: actions/checkout@v4
-        with:
-          repository: hedge-dev/XenosRecomp
-          ref: 990d03b28a27b50277ee5d8d942e1c5f873869d1
-          path: .ci/TempXenos
-          submodules: recursive
-
-      - name: Restore XenosRecomp Thirdparty
+      - name: Test runner
+        shell: pwsh
         run: |
-          $source = ".ci/TempXenos/thirdparty"
-          $destination = "XenosRecomp/thirdparty"
-
-          if (-not (Test-Path "$source/CMakeLists.txt")) {
-            throw "Upstream XenosRecomp thirdparty checkout is incomplete."
-          }
-
-          if (Test-Path $destination) {
-            Remove-Item $destination -Recurse -Force
-          }
-
-          Copy-Item $source $destination -Recurse -Force
-
-      - name: Set Up MSVC and Windows SDK
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-
-      - name: Install LLVM 20.1.8
-        uses: KyleMayes/install-llvm-action@v2
-        with:
-          version: "20.1.8"
-          arch: x64
-          directory: ${{ runner.temp }}/llvm
-
-      - name: Set and Check Compilers
-        run: |
-          $cc = "$env:LLVM_PATH/bin/clang.exe"
-          $cxx = "$env:LLVM_PATH/bin/clang++.exe"
-
-          if (-not (Test-Path $cc) -or -not (Test-Path $cxx)) {
-            throw "LLVM compiler executables were not found."
-          }
-
-          "CC=$cc" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
-          "CXX=$cxx" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
-
-          & $cxx --version
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          & $cxx --target=x86_64-pc-windows-msvc -dumpmachine
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          cmake --version
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          ninja --version
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Configure XenosRecomp
-        run: >-
-          cmake --fresh
-          -S XenosRecomp
-          -B XenosRecomp/build
-          -G Ninja
-          -DCMAKE_BUILD_TYPE=Release
-          "-DCMAKE_C_COMPILER=$env:CC"
-          "-DCMAKE_CXX_COMPILER=$env:CXX"
-          -DCMAKE_C_COMPILER_TARGET=x86_64-pc-windows-msvc
-          -DCMAKE_CXX_COMPILER_TARGET=x86_64-pc-windows-msvc
-
-      - name: Build XenosRecomp
-        run: >-
-          cmake --build XenosRecomp/build
-          --target XenosRecomp
-          --parallel 2
-
-      # 工具成功后立即上传，后续 SP/MP 失败也能下载它。
-      - name: Upload XenosRecomp Tool
-        uses: actions/upload-artifact@v4
-        with:
-          name: XenosRecomp-Windows-x64
-          if-no-files-found: error
-          path: |
-            XenosRecomp/build/**/XenosRecomp.exe
-            XenosRecomp/build/**/*.dll
-
-      # 如需下载或生成游戏的 generated 目录，应在此步骤之前完成。
-      - name: Check Game Build Inputs
-        run: |
-          $required = @(
-            "nx1_sp/generated/rexglue.cmake",
-            "nx1_mp/generated/rexglue.cmake",
-            "rexglue-sdk/thirdparty/CMakeLists.txt"
-          )
-
-          $missing = @(
-            $required | Where-Object {
-              -not (Test-Path -LiteralPath $_ -PathType Leaf)
-            }
-          )
-
-          if ($missing.Count -gt 0) {
-            foreach ($file in $missing) {
-              Write-Output "::error::Missing required build input: $file"
-            }
-            throw "Restore ReXGlue dependencies and generate or restore the SP/MP generated directories before building."
-          }
-
-      - name: Configure Singleplayer
-        run: >-
-          cmake --fresh
-          -S nx1_sp
-          -B nx1_sp/build
-          -G Ninja
-          -DCMAKE_BUILD_TYPE=Release
-          "-DCMAKE_C_COMPILER=$env:CC"
-          "-DCMAKE_CXX_COMPILER=$env:CXX"
-          -DCMAKE_C_COMPILER_TARGET=x86_64-pc-windows-msvc
-          -DCMAKE_CXX_COMPILER_TARGET=x86_64-pc-windows-msvc
-
-      - name: Build Singleplayer
-        run: >-
-          cmake --build nx1_sp/build
-          --target nx1_sp
-          --parallel 2
-
-      - name: Configure Multiplayer
-        run: >-
-          cmake --fresh
-          -S nx1_mp
-          -B nx1_mp/build
-          -G Ninja
-          -DCMAKE_BUILD_TYPE=Release
-          "-DCMAKE_C_COMPILER=$env:CC"
-          "-DCMAKE_CXX_COMPILER=$env:CXX"
-          -DCMAKE_C_COMPILER_TARGET=x86_64-pc-windows-msvc
-          -DCMAKE_CXX_COMPILER_TARGET=x86_64-pc-windows-msvc
-
-      - name: Build Multiplayer
-        run: >-
-          cmake --build nx1_mp/build
-          --target nx1_mp
-          --parallel 2
-
-      - name: Upload Compiled Executables
-        uses: actions/upload-artifact@v4
-        with:
-          name: NX1-Compiled-Binaries
-          if-no-files-found: error
-          path: |
-            XenosRecomp/build/**/XenosRecomp.exe
-            XenosRecomp/build/**/*.dll
-            nx1_sp/build/**/nx1_sp.exe
-            nx1_sp/build/**/*.dll
-            nx1_sp/out/**/nx1_sp.exe
-            nx1_sp/out/**/*.dll
-            nx1_mp/build/**/nx1_mp.exe
-            nx1_mp/build/**/*.dll
-            nx1_mp/out/**/nx1_mp.exe
-            nx1_mp/out/**/*.dll
-            rexglue-sdk/out/**/*.dll
+          Write-Host "Runner: $env:RUNNER_NAME"
+          Write-Host "Workspace: $env:GITHUB_WORKSPACE"
+          Get-CimInstance Win32_OperatingSystem |
+            Select-Object Caption, Version, OSArchitecture
+          Get-PSDrive C
