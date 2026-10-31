@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   test:
-    runs-on: [self-hosted, windows, x64, nx1-local]
+runs-on: self-hosted
 
     steps:
       - name: Test runner
