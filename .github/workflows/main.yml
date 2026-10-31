@@ -1,22 +1,65 @@
-name: sart
+name: Build NX1-Reborn Locally
 
 on:
   workflow_dispatch:
+    inputs:
+      nx1_root:
+        description: '本机 NX1 输入目录，目录内应直接包含 1-nx1sp.xex 和 5-nx1mp_demo.xex'
+        required: true
+        default: 'C:\NX1-private\nx1'
 
 permissions:
   contents: read
 
 jobs:
-  test:
+  build:
     runs-on: [self-hosted, windows, x64]
 
+    defaults:
+      run:
+        shell: powershell
+
     steps:
-     - name: Checkout Code
+      - name: Checkout Repository
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          clean: true
 
-      # 为现有的依赖恢复方案固定上游版本，避免每次运行拉到不同内容。
+      - name: Stage Local NX1 Input
+        env:
+          NX1_ROOT: ${{ inputs.nx1_root }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $source = $env:NX1_ROOT
+          $destination = Join-Path $env:GITHUB_WORKSPACE 'nx1'
+
+          if (-not (Test-Path -LiteralPath $source -PathType Container)) {
+            throw "NX1 input directory does not exist: $source"
+          }
+
+          foreach ($name in @('1-nx1sp.xex', '5-nx1mp_demo.xex')) {
+            $file = Join-Path $source $name
+
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+              throw "Missing required input: $file"
+            }
+          }
+
+          if (Test-Path -LiteralPath $destination) {
+            Remove-Item -LiteralPath $destination -Recurse -Force
+          }
+
+          New-Item -ItemType Directory -Path $destination -Force | Out-Null
+
+          Get-ChildItem -LiteralPath $source -Force |
+            Copy-Item -Destination $destination -Recurse -Force
+
+          Write-Host "NX1 input staged from: $source"
+          Get-ChildItem -LiteralPath $destination -Filter '*.xex' -File |
+            Select-Object Name, Length
+
       - name: Checkout XenosRecomp Dependencies
         uses: actions/checkout@v4
         with:
@@ -24,21 +67,32 @@ jobs:
           ref: 990d03b28a27b50277ee5d8d942e1c5f873869d1
           path: .ci/TempXenos
           submodules: recursive
+          persist-credentials: false
 
       - name: Restore XenosRecomp Thirdparty
         run: |
-          $source = ".ci/TempXenos/thirdparty"
-          $destination = "XenosRecomp/thirdparty"
+          $ErrorActionPreference = 'Stop'
 
-          if (-not (Test-Path "$source/CMakeLists.txt")) {
-            throw "Upstream XenosRecomp thirdparty checkout is incomplete."
+          $source = Join-Path $env:GITHUB_WORKSPACE '.ci\TempXenos\thirdparty'
+          $destination = Join-Path $env:GITHUB_WORKSPACE 'XenosRecomp\thirdparty'
+
+          if (-not (Test-Path -LiteralPath "$source\CMakeLists.txt" -PathType Leaf)) {
+            throw 'XenosRecomp thirdparty checkout is incomplete.'
           }
 
-          if (Test-Path $destination) {
-            Remove-Item $destination -Recurse -Force
+          if (Test-Path -LiteralPath $destination) {
+            Remove-Item -LiteralPath $destination -Recurse -Force
           }
 
-          Copy-Item $source $destination -Recurse -Force
+          Copy-Item `
+            -Path (Join-Path $source '*') `
+            -Destination $destination `
+            -Recurse `
+            -Force
+
+          if (-not (Test-Path -LiteralPath "$destination\CMakeLists.txt" -PathType Leaf)) {
+            throw 'Failed to restore XenosRecomp thirdparty.'
+          }
 
       - name: Set Up MSVC and Windows SDK
         uses: ilammy/msvc-dev-cmd@v1
@@ -48,134 +102,325 @@ jobs:
       - name: Install LLVM 20.1.8
         uses: KyleMayes/install-llvm-action@v2
         with:
-          version: "20.1.8"
+          version: '20.1.8'
           arch: x64
-          directory: ${{ runner.temp }}/llvm
+          directory: '${{ runner.temp }}/llvm'
 
-      - name: Set and Check Compilers
+      - name: Set Compiler Environment
         run: |
-          $cc = "$env:LLVM_PATH/bin/clang.exe"
-          $cxx = "$env:LLVM_PATH/bin/clang++.exe"
+          $ErrorActionPreference = 'Stop'
 
-          if (-not (Test-Path $cc) -or -not (Test-Path $cxx)) {
-            throw "LLVM compiler executables were not found."
+          $cc = Join-Path $env:LLVM_PATH 'bin\clang.exe'
+          $cxx = Join-Path $env:LLVM_PATH 'bin\clang++.exe'
+
+          if (-not (Test-Path -LiteralPath $cc -PathType Leaf)) {
+            throw "clang.exe was not found: $cc"
+          }
+
+          if (-not (Test-Path -LiteralPath $cxx -PathType Leaf)) {
+            throw "clang++.exe was not found: $cxx"
           }
 
           "CC=$cc" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "CXX=$cxx" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
 
           & $cxx --version
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          & $cxx --target=x86_64-pc-windows-msvc -dumpmachine
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
 
           cmake --version
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
 
           ninja --version
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($LASTEXITCODE -ne 0) {
+            throw 'ninja was not found. Install Ninja or Visual Studio CMake/Ninja tools on the runner.'
+          }
 
       - name: Configure XenosRecomp
-        run: >-
-          cmake --fresh
-          -S XenosRecomp
-          -B XenosRecomp/build
-          -G Ninja
-          -DCMAKE_BUILD_TYPE=Release
-          "-DCMAKE_C_COMPILER=$env:CC"
-          "-DCMAKE_CXX_COMPILER=$env:CXX"
-          -DCMAKE_C_COMPILER_TARGET=x86_64-pc-windows-msvc
-          -DCMAKE_CXX_COMPILER_TARGET=x86_64-pc-windows-msvc
+        run: |
+          cmake --fresh `
+            -S XenosRecomp `
+            -B XenosRecomp/build `
+            -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            "-DCMAKE_C_COMPILER=$env:CC" `
+            "-DCMAKE_CXX_COMPILER=$env:CXX" `
+            -DCMAKE_C_COMPILER_TARGET=x86_64-pc-windows-msvc `
+            -DCMAKE_CXX_COMPILER_TARGET=x86_64-pc-windows-msvc
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
 
       - name: Build XenosRecomp
-        run: >-
-          cmake --build XenosRecomp/build
-          --target XenosRecomp
-          --parallel 2
+        run: |
+          cmake --build XenosRecomp/build `
+            --target XenosRecomp `
+            --parallel 2
 
-      # 工具成功后立即上传，后续 SP/MP 失败也能下载它。
-      - name: Upload XenosRecomp Tool
-        uses: actions/upload-artifact@v4
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Checkout ReXGlue Dependency Source
+        uses: actions/checkout@v4
         with:
-          name: XenosRecomp-Windows-x64
-          if-no-files-found: error
-          path: |
-            XenosRecomp/build/**/XenosRecomp.exe
-            XenosRecomp/build/**/*.dll
+          repository: rexglue/rexglue-sdk
+          ref: e8ce24fa73cd7c1ede80262c06f34893b7963dbe
+          path: .ci/TempRex
+          submodules: recursive
+          persist-credentials: false
 
-      # 如需下载或生成游戏的 generated 目录，应在此步骤之前完成。
-      - name: Check Game Build Inputs
+      - name: Restore ReXGlue Thirdparty Into Local Fork
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $source = Join-Path $env:GITHUB_WORKSPACE '.ci\TempRex\thirdparty'
+          $destination = Join-Path $env:GITHUB_WORKSPACE 'rexglue-sdk\thirdparty'
+
+          if (-not (Test-Path -LiteralPath "$source\CMakeLists.txt" -PathType Leaf)) {
+            throw 'ReXGlue thirdparty checkout is incomplete.'
+          }
+
+          if (Test-Path -LiteralPath $destination) {
+            Remove-Item -LiteralPath $destination -Recurse -Force
+          }
+
+          New-Item -ItemType Directory -Path $destination -Force | Out-Null
+
+          Copy-Item `
+            -Path (Join-Path $source '*') `
+            -Destination $destination `
+            -Recurse `
+            -Force
+
+          $required = @(
+            'cli11',
+            'libmspack',
+            'FFmpeg',
+            'tomlplusplus',
+            'simde',
+            'xxHash',
+            'spdlog',
+            'fmt',
+            'snappy',
+            'utfcpp',
+            'imgui',
+            'sdl3'
+          )
+
+          foreach ($name in $required) {
+            $sourceSubmodule = Join-Path $source $name
+            $destinationSubmodule = Join-Path $destination $name
+
+            if (-not (Test-Path -LiteralPath $sourceSubmodule -PathType Container)) {
+              throw "Missing ReXGlue submodule source: $name"
+            }
+
+            if (-not (Test-Path -LiteralPath $destinationSubmodule -PathType Container)) {
+              throw "Failed to copy ReXGlue submodule: $name"
+            }
+
+            $gitDir = (& git -C $sourceSubmodule rev-parse --absolute-git-dir 2>$null | Out-String).Trim()
+
+            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($gitDir)) {
+              throw "Could not resolve Git directory for submodule: $name"
+            }
+
+            $marker = Join-Path $destinationSubmodule '.git'
+
+            if (Test-Path -LiteralPath $marker) {
+              Remove-Item -LiteralPath $marker -Recurse -Force
+            }
+
+            Set-Content `
+              -LiteralPath $marker `
+              -Value ("gitdir: " + $gitDir.Replace('\', '/')) `
+              -Encoding ascii
+          }
+
+          if (-not (Test-Path -LiteralPath "$destination\CMakeLists.txt" -PathType Leaf)) {
+            throw 'ReXGlue thirdparty restoration failed.'
+          }
+
+          if (-not (Test-Path -LiteralPath "$destination\cli11\.git" -PathType Leaf)) {
+            throw 'ReXGlue submodule marker restoration failed.'
+          }
+
+      - name: Configure ReXGlue Code Generator
+        run: |
+          cmake --fresh `
+            -S rexglue-sdk `
+            -B rexglue-sdk/build-codegen `
+            -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            "-DCMAKE_C_COMPILER=$env:CC" `
+            "-DCMAKE_CXX_COMPILER=$env:CXX" `
+            -DCMAKE_C_COMPILER_TARGET=x86_64-pc-windows-msvc `
+            -DCMAKE_CXX_COMPILER_TARGET=x86_64-pc-windows-msvc `
+            -DREXGLUE_BUILD_TESTS=OFF `
+            -DREXGLUE_ENABLE_TRACY=OFF `
+            -DREXGLUE_ENABLE_DISCORD_SOCIAL_SDK=OFF `
+            -DREXGLUE_USE_VULKAN=OFF `
+            -DREXGLUE_USE_D3D12=ON
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Build ReXGlue Code Generator
+        run: |
+          cmake --build rexglue-sdk/build-codegen `
+            --target rexglue `
+            --parallel 2
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+          $rexglue = Join-Path $env:GITHUB_WORKSPACE 'rexglue-sdk\out\win-amd64\rexglue.exe'
+
+          if (-not (Test-Path -LiteralPath $rexglue -PathType Leaf)) {
+            throw "ReXGlue executable was not produced: $rexglue"
+          }
+
+      - name: Generate Singleplayer and Multiplayer Code
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $rexglue = Join-Path $env:GITHUB_WORKSPACE 'rexglue-sdk\out\win-amd64\rexglue.exe'
+
+          if (-not (Test-Path -LiteralPath $rexglue -PathType Leaf)) {
+            throw "ReXGlue executable not found: $rexglue"
+          }
+
+          & $rexglue -f codegen nx1_sp/nx1_sp_manifest.toml
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+          & $rexglue -f codegen nx1_mp/nx1_mp_manifest.toml
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Check Generated Sources
         run: |
           $required = @(
-            "nx1_sp/generated/rexglue.cmake",
-            "nx1_mp/generated/rexglue.cmake",
-            "rexglue-sdk/thirdparty/CMakeLists.txt"
+            'nx1_sp/generated/rexglue.cmake',
+            'nx1_sp/generated/1-nx1sp/sources.cmake',
+            'nx1_mp/generated/rexglue.cmake',
+            'nx1_mp/generated/5-nx1mp_demo/sources.cmake'
           )
 
-          $missing = @(
-            $required | Where-Object {
-              -not (Test-Path -LiteralPath $_ -PathType Leaf)
+          foreach ($file in $required) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+              throw "Missing generated file: $file"
             }
-          )
-
-          if ($missing.Count -gt 0) {
-            foreach ($file in $missing) {
-              Write-Output "::error::Missing required build input: $file"
-            }
-            throw "Restore ReXGlue dependencies and generate or restore the SP/MP generated directories before building."
           }
 
       - name: Configure Singleplayer
-        run: >-
-          cmake --fresh
-          -S nx1_sp
-          -B nx1_sp/build
-          -G Ninja
-          -DCMAKE_BUILD_TYPE=Release
-          "-DCMAKE_C_COMPILER=$env:CC"
-          "-DCMAKE_CXX_COMPILER=$env:CXX"
-          -DCMAKE_C_COMPILER_TARGET=x86_64-pc-windows-msvc
-          -DCMAKE_CXX_COMPILER_TARGET=x86_64-pc-windows-msvc
+        run: |
+          cmake --fresh `
+            -S nx1_sp `
+            -B nx1_sp/build `
+            -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            "-DREXSDK_DIR=$env:GITHUB_WORKSPACE/rexglue-sdk" `
+            "-DCMAKE_C_COMPILER=$env:CC" `
+            "-DCMAKE_CXX_COMPILER=$env:CXX" `
+            -DCMAKE_C_COMPILER_TARGET=x86_64-pc-windows-msvc `
+            -DCMAKE_CXX_COMPILER_TARGET=x86_64-pc-windows-msvc `
+            -DREXGLUE_ENABLE_TRACY=OFF `
+            -DREXGLUE_ENABLE_DISCORD_SOCIAL_SDK=OFF `
+            -DREXGLUE_USE_VULKAN=OFF `
+            -DREXGLUE_USE_D3D12=ON
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
 
       - name: Build Singleplayer
-        run: >-
-          cmake --build nx1_sp/build
-          --target nx1_sp
-          --parallel 2
+        run: |
+          cmake --build nx1_sp/build `
+            --target nx1_sp `
+            --parallel 2
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
 
       - name: Configure Multiplayer
-        run: >-
-          cmake --fresh
-          -S nx1_mp
-          -B nx1_mp/build
-          -G Ninja
-          -DCMAKE_BUILD_TYPE=Release
-          "-DCMAKE_C_COMPILER=$env:CC"
-          "-DCMAKE_CXX_COMPILER=$env:CXX"
-          -DCMAKE_C_COMPILER_TARGET=x86_64-pc-windows-msvc
-          -DCMAKE_CXX_COMPILER_TARGET=x86_64-pc-windows-msvc
+        run: |
+          cmake --fresh `
+            -S nx1_mp `
+            -B nx1_mp/build `
+            -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            "-DREXSDK_DIR=$env:GITHUB_WORKSPACE/rexglue-sdk" `
+            "-DCMAKE_C_COMPILER=$env:CC" `
+            "-DCMAKE_CXX_COMPILER=$env:CXX" `
+            -DCMAKE_C_COMPILER_TARGET=x86_64-pc-windows-msvc `
+            -DCMAKE_CXX_COMPILER_TARGET=x86_64-pc-windows-msvc `
+            -DREXGLUE_ENABLE_TRACY=OFF `
+            -DREXGLUE_ENABLE_DISCORD_SOCIAL_SDK=OFF `
+            -DREXGLUE_USE_VULKAN=OFF `
+            -DREXGLUE_USE_D3D12=ON
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
 
       - name: Build Multiplayer
-        run: >-
-          cmake --build nx1_mp/build
-          --target nx1_mp
-          --parallel 2
+        run: |
+          cmake --build nx1_mp/build `
+            --target nx1_mp `
+            --parallel 2
 
-      - name: Upload Compiled Executables
-        uses: actions/upload-artifact@v4
-        with:
-          name: NX1-Compiled-Binaries
-          if-no-files-found: error
-          path: |
-            XenosRecomp/build/**/XenosRecomp.exe
-            XenosRecomp/build/**/*.dll
-            nx1_sp/build/**/nx1_sp.exe
-            nx1_sp/build/**/*.dll
-            nx1_sp/out/**/nx1_sp.exe
-            nx1_sp/out/**/*.dll
-            nx1_mp/build/**/nx1_mp.exe
-            nx1_mp/build/**/*.dll
-            nx1_mp/out/**/nx1_mp.exe
-            nx1_mp/out/**/*.dll
-            rexglue-sdk/out/**/*.dll
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Verify Local Build Outputs
+        run: |
+          $searchRoots = @(
+            'XenosRecomp',
+            'nx1_sp',
+            'nx1_mp',
+            'rexglue-sdk\out'
+          )
+
+          $executables = @()
+
+          foreach ($root in $searchRoots) {
+            if (Test-Path -LiteralPath $root) {
+              $executables += Get-ChildItem `
+                -LiteralPath $root `
+                -Recurse `
+                -File `
+                -Filter '*.exe' `
+                -ErrorAction SilentlyContinue
+            }
+          }
+
+          $executables |
+            Sort-Object FullName -Unique |
+            Select-Object FullName, Length |
+            Format-Table -AutoSize
+
+          $sp = $executables | Where-Object { $_.Name -eq 'nx1_sp.exe' }
+          $mp = $executables | Where-Object { $_.Name -eq 'nx1_mp.exe' }
+
+          if (-not $sp) {
+            throw 'nx1_sp.exe was not produced.'
+          }
+
+          if (-not $mp) {
+            throw 'nx1_mp.exe was not produced.'
+          }
+
+          Write-Host "Singleplayer executable: $($sp.FullName)"
+          Write-Host "Multiplayer executable: $($mp.FullName)"
