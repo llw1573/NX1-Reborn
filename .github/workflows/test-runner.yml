@@ -1,0 +1,30 @@
+name: Test Local Runner
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: [self-hosted, windows, x64]
+
+    steps:
+      - name: Check Runner
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          Write-Host "Runner name: $env:RUNNER_NAME"
+          Write-Host "Runner OS: $env:RUNNER_OS"
+          Write-Host "Runner arch: $env:RUNNER_ARCH"
+          Write-Host "Workspace: $env:GITHUB_WORKSPACE"
+
+          whoami
+          Get-Location
+          Get-PSDrive C
+
+          git --version
+          cmake --version
+          ninja --version
