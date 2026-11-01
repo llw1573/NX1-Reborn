@@ -84,15 +84,28 @@ jobs:
             Remove-Item -LiteralPath $destination -Recurse -Force
           }
 
-          Copy-Item `
-            -Path (Join-Path $source '*') `
-            -Destination $destination `
-            -Recurse `
-            -Force
+          # 必须先创建目标目录，再复制其中的内容。
+          New-Item -ItemType Directory -Path $destination -Force | Out-Null
 
-          if (-not (Test-Path -LiteralPath "$destination\CMakeLists.txt" -PathType Leaf)) {
-            throw 'Failed to restore XenosRecomp thirdparty.'
+          Get-ChildItem -LiteralPath $source -Force |
+            Copy-Item -Destination $destination -Recurse -Force
+
+          $required = @(
+            'CMakeLists.txt',
+            'fmt\CMakeLists.txt',
+            'xxHash\cmake_unofficial\CMakeLists.txt',
+            'zstd\build\cmake\CMakeLists.txt',
+            'smol-v\source\smolv.cpp',
+            'dxc-bin\CMakeLists.txt'
+          )
+
+          foreach ($file in $required) {
+            if (-not (Test-Path -LiteralPath (Join-Path $destination $file) -PathType Leaf)) {
+              throw "Dependency copy is incomplete: $file"
+            }
           }
+
+          Write-Host 'XenosRecomp thirdparty restored successfully.'
 
       - name: Set Up MSVC and Windows SDK
         uses: ilammy/msvc-dev-cmd@v1
