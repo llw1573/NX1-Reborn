@@ -296,6 +296,43 @@ jobs:
             throw 'ReXGlue submodule marker restoration failed.'
           }
 
+      - name: Materialize libmspack Symlink Sources on Windows
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $upstream = Join-Path $env:GITHUB_WORKSPACE '.ci\TempRex\thirdparty\libmspack'
+          $restored = Join-Path $env:GITHUB_WORKSPACE 'rexglue-sdk\thirdparty\libmspack'
+          $sourceRoot = [IO.Path]::GetFullPath($upstream).TrimEnd('\') + '\'
+          $entries = @(& git -c "safe.directory=$upstream" -C $upstream ls-files --stage -- cabextract/mspack)
+          if ($LASTEXITCODE -ne 0) { throw 'Could not inspect libmspack Git symlinks.' }
+          $count = 0
+          foreach ($entry in $entries) {
+            if ($entry -notmatch '^120000 ([0-9a-f]+) 0\t(cabextract/mspack/[^/]+)$') { continue }
+            $objectId = $Matches[1]
+            $relative = $Matches[2]
+            $linkTarget = (& git -c "safe.directory=$upstream" -C $upstream cat-file -p $objectId | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($linkTarget)) {
+              throw "Could not read symlink target: $relative"
+            }
+            $original = Join-Path $upstream $relative
+            $resolved = [IO.Path]::GetFullPath((Join-Path (Split-Path $original -Parent) $linkTarget))
+            if (-not $resolved.StartsWith($sourceRoot, [StringComparison]::OrdinalIgnoreCase) -or
+                -not (Test-Path -LiteralPath $resolved -PathType Leaf)) {
+              throw "Invalid libmspack symlink target: $relative -> $linkTarget"
+            }
+            $target = Join-Path $restored $relative
+            $existing = Get-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
+            if ($existing -and ($existing.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+              Remove-Item -LiteralPath $target -Force
+            }
+            Copy-Item -LiteralPath $resolved -Destination $target -Force
+            if ((Get-FileHash -LiteralPath $resolved).Hash -ne (Get-FileHash -LiteralPath $target).Hash) {
+              throw "libmspack source copy verification failed: $relative"
+            }
+            $count++
+          }
+          if ($count -eq 0) { throw 'Expected libmspack symlink sources were not found.' }
+          Write-Host "Materialized and verified $count libmspack symlink files."
+
       - name: Configure ReXGlue Code Generator
         run: |
           cmake --fresh `
