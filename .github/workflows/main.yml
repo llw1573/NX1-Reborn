@@ -32,8 +32,13 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $source = $env:NX1_ROOT
+          $source = (Resolve-Path -LiteralPath $env:NX1_ROOT).Path.TrimEnd('\')
           $destination = Join-Path $env:GITHUB_WORKSPACE 'nx1'
+          $workspaceRoot = [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE).TrimEnd('\')
+          if ($source.Equals($workspaceRoot, [StringComparison]::OrdinalIgnoreCase) -or
+              $source.StartsWith($workspaceRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'NX1_ROOT must be outside the runner workspace.'
+          }
 
           if (-not (Test-Path -LiteralPath $source -PathType Container)) {
             throw "NX1 input directory does not exist: $source"
@@ -53,10 +58,12 @@ jobs:
 
           New-Item -ItemType Directory -Path $destination -Force | Out-Null
 
-          Get-ChildItem -LiteralPath $source -Force |
-            Copy-Item -Destination $destination -Recurse -Force
+          # Current manifests need only these XEX inputs for code generation.
+          foreach ($name in @('1-nx1sp.xex', '5-nx1mp_demo.xex')) {
+            Copy-Item -LiteralPath (Join-Path $source $name) -Destination $destination -Force
+          }
 
-          Write-Host "NX1 input staged from: $source"
+          Write-Host "NX1 codegen inputs staged from: $source"
           Get-ChildItem -LiteralPath $destination -Filter '*.xex' -File |
             Select-Object Name, Length
 
@@ -112,12 +119,38 @@ jobs:
         with:
           arch: x64
 
-      - name: Install LLVM 20.1.8
-        uses: KyleMayes/install-llvm-action@v2
-        with:
-          version: '20.1.8'
-          arch: x64
-          directory: '${{ runner.temp }}/llvm'
+      - name: Install or Reuse LLVM 20.1.8 Locally
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $llvm = 'C:\NX1-tools\LLVM-20.1.8'
+          $compiler = Join-Path $llvm 'bin\clang++.exe'
+          if (-not (Test-Path -LiteralPath $compiler)) {
+            New-Item -ItemType Directory -Path 'C:\NX1-tools' -Force | Out-Null
+            $installer = 'C:\NX1-tools\LLVM-20.1.8-win64.exe'
+            & curl.exe --fail --location --silent --show-error --retry 3 --connect-timeout 20 --max-time 1800 --proxy socks5h://192.168.5.2:10810 --output $installer https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/LLVM-20.1.8-win64.exe
+            if ($LASTEXITCODE -ne 0) { throw 'LLVM download failed.' }
+            if ((Get-FileHash -LiteralPath $installer).Hash -ine '3197846a2b19063687dd56e93e34cd941e3548d907f23a6131571321bdf9fe7b') {
+              throw 'LLVM installer SHA256 mismatch.'
+            }
+            $install = Start-Process -FilePath $installer -ArgumentList @('/S', "/D=$llvm") -Wait -PassThru
+            if ($install.ExitCode -ne 0) { throw "LLVM install failed: $($install.ExitCode)" }
+          }
+          if (-not (Test-Path -LiteralPath $compiler)) { throw 'LLVM compiler was not installed.' }
+          & $compiler --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "LLVM_PATH=$llvm" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Locate CMake and Ninja
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cmakeTools = Join-Path $env:VSINSTALLDIR 'Common7\IDE\CommonExtensions\Microsoft\CMake'
+          foreach ($relative in @('CMake\bin', 'Ninja')) {
+            $toolDir = Join-Path $cmakeTools $relative
+            if (-not (Test-Path -LiteralPath $toolDir -PathType Container)) {
+              throw "Missing VS CMake/Ninja tools: $toolDir"
+            }
+            $toolDir | Out-File $env:GITHUB_PATH -Encoding utf8 -Append
+          }
 
       - name: Set Compiler Environment
         run: |
@@ -437,3 +470,16 @@ jobs:
 
           Write-Host "Singleplayer executable: $($sp.FullName)"
           Write-Host "Multiplayer executable: $($mp.FullName)"
+
+          # Preserve binaries locally outside checkout, which is cleaned on the next run.
+          $outputRoot = Join-Path 'C:\NX1-output' ("run-{0}-attempt-{1}" -f $env:GITHUB_RUN_ID, $env:GITHUB_RUN_ATTEMPT)
+          foreach ($target in @('XenosRecomp', 'rexglue', 'nx1_sp', 'nx1_mp')) {
+            $binary = $executables | Where-Object { $_.Name -eq "$target.exe" } | Select-Object -First 1
+            if (-not $binary) { throw "Missing output executable: $target.exe" }
+            $outputDir = Join-Path $outputRoot $target
+            New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
+            Copy-Item -LiteralPath $binary.FullName -Destination $outputDir -Force
+            Get-ChildItem -LiteralPath $binary.DirectoryName -Filter '*.dll' -File |
+              Copy-Item -Destination $outputDir -Force
+          }
+          Write-Host "Binaries saved locally: $outputRoot"
